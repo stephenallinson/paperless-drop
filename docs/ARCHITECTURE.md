@@ -32,12 +32,12 @@ triggers paperless-gpt. Either part is useful without the other.
  │ "Open with → Send to Paperless"┼┼─ HTTPS ─▶  POST /api/documents/post_document/      │
  │ ~/Paperless-Inbox (watcher)  ─┘│  API     │      │ consume (Tesseract OCR)           │
  │          │                     │  token   │      ▼                                   │
- │   paperless-drop send          │          │  Workflow: "on added → add tag `ai-inbox`"│
+ │   paperless-drop send          │          │  Workflow: "on added → paperless-gpt-auto"│
  │          │                     │          │      │                                   │
  │   notify-send ◀── poll task ───┼──────────┤      ▼                                   │
  └──────────────────────────────┘          │ paperless-gpt ── OpenRouter (gpt-6-luna)   │
-                                           │   └─ LLM OCR where needed, then title,     │
-                                           │      tags, correspondent, type, date       │
+                                           │   └─ title, tags, correspondent, type,     │
+                                           │      date (LLM OCR on demand)              │
                                            └──────────────────────────────────────────┘
 ```
 
@@ -226,64 +226,78 @@ Applied by you from [SERVER-RUNBOOK.md](SERVER-RUNBOOK.md). Summary of the desig
 
 ### 2.1 What it does
 
-paperless-gpt (icereed/paperless-gpt, v0.29.0, released 2026-10-05) is a sidecar container. It
-polls Paperless for documents carrying a trigger tag, sends them to an LLM and **writes the
-results back itself**: title, tags, correspondent, document type and created date, plus LLM
-vision OCR text. Nothing waits for a click.
+paperless-gpt (icereed/paperless-gpt) is a sidecar container. It polls Paperless for documents
+carrying a trigger tag, sends them to an LLM and **writes the results back itself**: title, tags,
+correspondent, document type and created date, plus LLM vision OCR text. Nothing waits for a click.
+This design targets **v0.29.0** (2026-10-05), checked against that release's source code.
 
 ### 2.2 Pipeline
 
 ```
 paperless-drop upload
-   └▶ Paperless consumes the file (Tesseract)
-        └▶ Paperless workflow "Document Added" ─ assigns tag `ai-inbox`
-             └▶ paperless-gpt workflow "Inbox" (trigger tag `ai-inbox`, OCR enabled)
-                  1. OCR the pages that need it (digital pages with a clean text layer are skipped)
-                  2. generate and apply title / tags / correspondent / type / date
-                  3. remove `ai-inbox`, add `paperless-gpt-auto-complete`
+   └▶ Paperless consumes the file (its own OCR text)
+        └▶ Paperless workflow "Document Added" ─ assigns tag `paperless-gpt-auto`
+             └▶ paperless-gpt generates and applies title / tags / correspondent / type / date
+                  └▶ removes `paperless-gpt-auto`, adds `paperless-gpt-auto-complete`
+
+A scan with poor text: add tag `paperless-gpt-ocr-auto` by hand
+   └▶ paperless-gpt runs LLM vision OCR, replaces the document's content text
+        └▶ removes `paperless-gpt-ocr-auto`, adds `paperless-gpt-ocr-complete`
 ```
 
-Both steps run inside a single paperless-gpt workflow, so paperless-gpt guarantees the order.
-Because the trigger tag is assigned by a **Paperless workflow**, it applies to every ingestion
-path (paperless-drop, web UI, phone, email), and paperless-drop stays generic (`tags = []`).
+Because the trigger tag is assigned by a **Paperless workflow**, it applies to every ingestion path
+(paperless-drop, web UI, phone, email), and paperless-drop stays generic (`tags = []`).
+
+**Why OCR is on demand and not automatic.** The first draft chained OCR then metadata for every
+document, using paperless-gpt's *AI Workflows* and `OCR_SKIP_DIGITAL_PAGES`. Both landed on `main`
+(2026-10-06 and 2026-10-08) *after* v0.29.0, so neither exists in the release we run. Without the
+skip feature, every born-digital PDF would be needlessly re-OCR'd by the LLM, which costs money and
+cannot improve exact text. Paperless's own OCR is good for those, and for most scans. LLM OCR stays
+available for the occasional poor scan. See *Upgrading later* in the runbook.
 
 ### 2.3 Models
 
 | Role | Model | Price (OpenRouter, per million tokens, in / out) |
 |---|---|---|
 | Metadata | `openai/gpt-6-luna` | $0.10 / $0.50 |
-| OCR (vision) | `openai/gpt-6-luna` | $0.10 / $0.50 |
+| OCR (vision, on demand) | `openai/gpt-6-luna` | $0.10 / $0.50 |
 
-About $0.0005 per scanned page. Born-digital PDFs skip the OCR pass. Use pinned slugs, not the
-floating `~…-latest` aliases or the asynchronous `:batch` variants. If OCR quality disappoints on
-real scans, `z-ai/glm-5.3-flash` (also vision-capable) is the alternative to compare, by changing
-`VISION_LLM_MODEL`.
+Luna is a reasoning model, so hidden reasoning tokens are billed as output. The real per-request
+cost is measured in the runbook's smoke test before automation is enabled. Use pinned slugs, not the
+floating `~…-latest` aliases or the asynchronous `:batch` variants. `z-ai/glm-5.3-flash` (also
+vision-capable) is the alternative to compare.
 
 ### 2.4 Behaviour that matters
 
 - **Content, not files.** With LLM OCR, paperless-gpt replaces the document's *content* text. It
-  never modifies the original file. (Searchable-PDF output exists only with Google Document AI,
-  so `PDF_UPLOAD*` is not used.)
+  never modifies the original file. (Searchable-PDF output exists only with Google Document AI, so
+  `PDF_UPLOAD*` is not used.)
 - **Retries and failure.** After `AUTO_TAG_MAX_RETRIES` failures the trigger tag is removed and
   `paperless-gpt-failed` added, so a bad document stops being re-billed.
 - **Tags.** Your library started with 3 tags, so `CREATE_NEW_TAGS` begins as `true` and moves to
   `false` once you have curated the tag set (runbook step 3).
+- **Networking.** The Paperless stack's `backend` network is `internal: true` (no internet), so the
+  container joins both `backend` (to reach `webserver:8000`) and a new `egress` network (to reach
+  OpenRouter). It is not on the proxy network.
 
 ### 2.5 Security and cost
 
 - The paperless-gpt UI has no login of its own. It is bound to `127.0.0.1` and reached by SSH
   tunnel. Paperless itself is tailnet-only.
-- It gets its own Paperless user and token, and a dedicated OpenRouter key with a credit limit.
-- Secrets live in the compose `.env`, not in YAML.
-- OCR sends full page images to OpenRouter and the model provider. The runbook asks you to
-  review OpenRouter's privacy settings first.
+- It uses **your own Paperless token**, not a separate service user: Paperless hides every tag,
+  correspondent and document type from users who did not create them, so a service account's
+  creations showed as "Private" in the first test run. The cost is that its edits are attributed to
+  you. It also gets a dedicated OpenRouter key with a credit limit.
+- Secrets live in the stack's gitignored `.env`, not in YAML.
+- Metadata generation sends document text to OpenRouter and the model provider, and on-demand OCR
+  sends page images. The runbook asks you to review OpenRouter's privacy settings first.
 
 ### 2.6 Rollout
 
-Auto-apply from day one. A one-time smoke test (3 documents, step 9 of the runbook) runs with the
-Paperless workflow disabled; then it is enabled and nothing waits on a person. Two optional saved
-views ("AI processed (7 days)" and "AI needs attention") exist for spot checks and are never a
-queue.
+Auto-apply from day one. A one-time smoke test (preview one document, auto-process two, OCR one
+scan, measure cost) runs with the Paperless workflow disabled; then it is enabled and nothing waits
+on a person. Two optional saved views ("AI processed (7 days)" and "AI needs attention") exist for
+spot checks and are never a queue.
 
 ---
 
@@ -317,8 +331,8 @@ queue.
 | Tag-ID cache on disk | Resolved per run | A cache that can go stale costs more than one small request. |
 | Thunar: "rewrites uca.xml on exit, so run `thunar -q` first" | Merge in place with a backup; you restart Thunar | My claim about Thunar was unverified, and quitting your open window unasked would be rude. |
 | Open With entry hidden (`NoDisplay`) | Visible | Hidden entries don't show in Open With menus. |
-| Part 2: two Paperless workflows chaining OCR then metadata | One Paperless workflow + one paperless-gpt workflow with OCR enabled | paperless-gpt's own workflows run OCR before metadata, which removes two unverified assumptions. |
-| `PDF_UPLOAD_MODE=version` and `OCR_SKIP_DIGITAL_PAGES` together | Only the latter | Searchable-PDF output is Google Document AI only, and it switches skipping off. |
+| Part 2: two Paperless workflows chaining OCR then metadata | Metadata automatic via one Paperless workflow; OCR on demand | AI Workflows and `OCR_SKIP_DIGITAL_PAGES` are not in the v0.29.0 release (found by reading its source after a 404 on your server). Automatic OCR of everything would re-OCR born-digital PDFs. |
+| `PDF_UPLOAD_MODE=version` and `OCR_SKIP_DIGITAL_PAGES` | Neither | Searchable-PDF output is Google Document AI only, and the skip feature is not in v0.29.0. |
 | Metadata model GLM 5.3 Flash | `openai/gpt-6-luna` | Your decision. |
 | Service errors | Distinct from file errors | Files are never parked in `failed/` because Paperless was down or the token was wrong. |
 

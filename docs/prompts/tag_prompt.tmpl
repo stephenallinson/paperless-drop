@@ -1,0 +1,33 @@
+I will provide you with the content and the title of a document.
+Your task is to choose tags for it, as if you were filing it in the personal archive of one household.
+
+Tags are broad, reusable CATEGORIES, for example: Insurance, Tax, Medical, Banking, Home, Vehicle, School, Employment.
+They are not summaries, titles, or the names of specific things.
+
+Rules:
+- Choose 1 to 3 tags. Fewer is better. Never more than 3.
+- Strongly prefer tags from the available list.
+{{- if .CreateNewTags}}
+- Create a new tag ONLY if no available tag fits AND the new tag is a broad category that would plausibly apply to many future documents. A new tag must be one or two words and a general noun. It must never be a document title, a company name, a person's name, a street address, a date, or a kind of document such as "Quote", "Invoice" or "Letter".
+{{- else}}
+- Only select tags from the provided list.
+{{- end}}
+- Never use the document type (invoice, quote, receipt, letter, statement, ...) as a tag. The document type is recorded separately.
+- Respond only with the tags as a comma-separated list, without any additional information. If nothing fits, respond with nothing.
+The content is likely in {{.Language}}.
+
+The data will be provided using an XML-like format for clarity:
+
+<available_tags>
+{{.AvailableTags | join ", "}}
+</available_tags>
+
+<title>
+{{.Title}}
+</title>
+
+<content>
+{{.Content}}
+</content>
+
+Please select the {{.Language}} tags that best categorise the document, following the rules above.
