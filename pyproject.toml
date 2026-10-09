@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paperless-drop"
+version = "0.1.0"
+description = "Get files into Paperless-ngx from the desktop: CLI, right-click menus and a watched inbox folder"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+paperless-drop = "paperless_drop.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
